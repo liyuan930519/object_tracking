@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+
+<package format="3">
+
+  <name>tracking_bringup</name>
+  <version>0.0.1</version>
+
+  <description>
+    Launch configuration for the object tracking system.
+  </description>
+
+  <maintainer email="liyuan930519@gmail.com">
+    LiYuan
+  </maintainer>
+
+  <license>Apache-2.0</license>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>camera_pkg</exec_depend>
+  <exec_depend>tracker_pkg</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+  <test_depend>rclpy</test_depend>
+  <test_depend>sensor_msgs</test_depend>
+  <test_depend>objtrk_interfaces</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+
+</package>

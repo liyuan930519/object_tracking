@@ -1,0 +1,12 @@
+camera_node:
+  ros__parameters:
+    camera_mode: real
+    device_path: /dev/video0
+    width: 640
+    height: 480
+    fps: 10.0
+    frame_id: camera
+
+tracker_node:
+  ros__parameters:
+    min_area: 300.0

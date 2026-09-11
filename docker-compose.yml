@@ -1,0 +1,25 @@
+services:
+  tracking:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        ROS_DISTRO: ${ROS_DISTRO:-jazzy}
+
+    image: object-tracking:${ROS_DISTRO:-jazzy}
+
+    devices:
+      - "${CAMERA_DEVICE:-/dev/video0}:/dev/video0"
+
+    environment:
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+
+    volumes:
+      - ./objtrk_ws/src/tracking_bringup/config/tracking.yaml:/config/tracking.yaml:ro
+
+    command:
+      - ros2
+      - launch
+      - tracking_bringup
+      - tracking.launch.py
+      - config_file:=/config/tracking.yaml

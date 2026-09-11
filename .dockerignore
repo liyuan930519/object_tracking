@@ -1,0 +1,17 @@
+.git
+.env
+
+objtrk_ws/build
+objtrk_ws/install
+objtrk_ws/log
+
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.ruff_cache
+
+.venv
+venv
+
+.vscode
+.idea
