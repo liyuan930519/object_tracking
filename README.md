@@ -2,7 +2,11 @@
 
 A containerized ROS 2 object-tracking system built with **ROS 2 Jazzy**, **Python**, and **OpenCV**.
 
-The system publishes camera images from one node, detects the largest valid red object in another node, and publishes the target visibility and pixel coordinates. The default runtime uses a physical webcam; a deterministic fake camera is included for automated tests and Docker smoke testing.
+The system separates image acquisition from tracking: one ROS node publishes camera images, and a second node detects the largest valid red object and publishes its visibility and image-space centroid.
+
+The default runtime uses a physical webcam. A deterministic fake camera is included for automated tests and Docker smoke testing without hardware.
+
+---
 
 ## Architecture
 
@@ -16,12 +20,16 @@ TrackerNode
 
 Packages:
 
-- `camera_pkg`: camera node, physical/fake camera sources
+- `camera_pkg`: camera node and real/fake camera sources
 - `tracker_pkg`: tracker node and red-object detector
-- `objtrk_interfaces`: custom `ObjectState` message
-- `tracking_bringup`: launch, YAML configuration, system test
+- `objtrk_interfaces`: custom tracking-result message
+- `tracking_bringup`: launch files, YAML configuration, and system test
 
-`ObjectState.msg`:
+The source code uses relative topic names, which resolve to the paths above in the root namespace while remaining compatible with ROS namespaces/remapping.
+
+### Tracking output
+
+`objtrk_interfaces/msg/ObjectState.msg`:
 
 ```text
 std_msgs/Header header
@@ -40,6 +48,10 @@ x = NaN
 y = NaN
 ```
 
+A valid message is still published so downstream components do not need to infer target loss from a missing message.
+
+---
+
 ## Tracking Approach
 
 `RedObjectDetector`:
@@ -50,10 +62,14 @@ y = NaN
 4. applies morphological opening/closing;
 5. finds external contours;
 6. selects the largest contour;
-7. rejects contours smaller than `min_area`;
-8. computes the centroid from image moments.
+7. rejects contours below `min_area`;
+8. calculates the centroid using image moments.
 
-If several red regions exist, only the largest valid region is reported.
+If multiple red regions are present, only the largest valid region is reported.
+
+The detector is isolated from ROS communication so image-processing behavior can be unit tested independently.
+
+---
 
 ## Configuration
 
@@ -84,11 +100,7 @@ Fake configuration:
 objtrk_ws/src/tracking_bringup/config/tracking_fake.yaml
 ```
 
-uses the same image settings with:
-
-```yaml
-camera_mode: fake
-```
+uses the same image settings with `camera_mode: fake`.
 
 | Parameter | Default | Runtime behavior |
 |---|---:|---|
@@ -100,33 +112,24 @@ camera_mode: fake
 | `frame_id` | `camera` | dynamic |
 | `min_area` | `300.0` | dynamic |
 
-Examples (run in a shell where the ROS system is visible; for the Docker smoke test, run these **inside the running container**):
+Examples:
 
 ```bash
 ros2 param set /camera_node fps 5.0
 ros2 param set /tracker_node min_area 500.0
 ```
 
+---
+
 ## Command Execution Context
 
-Unless explicitly stated otherwise:
+- **Repository root**: `~/object_tracking`
+- **ROS workspace root**: `~/object_tracking/objtrk_ws`
+- `docker compose`, Git, `pipx`, and `pre-commit` commands run on the **host / WSL shell**.
+- `colcon build` and `colcon test` run from the **ROS workspace root** after sourcing ROS 2.
+- ROS inspection commands for the Docker smoke test run **inside the running container** after `docker compose ... exec tracking bash`.
 
-- **Host / WSL shell** means the development machine, not the running application container.
-- **Repository root** means the directory containing `docker-compose.yml`, for example:
-
-```text
-~/object_tracking
-```
-
-- **ROS workspace root** means:
-
-```text
-<repo-root>/objtrk_ws
-```
-
-- Commands beginning with `docker compose ...` are run on the **host / WSL shell from the repository root**.
-- Commands such as `ros2 node list` used to inspect the running Docker system are run **inside the running container** after `docker compose ... exec tracking bash`.
-- `pre-commit`, `pipx`, and Git commands are run on the **host / WSL shell**, not inside the application container.
+---
 
 ## Docker Build
 
@@ -136,43 +139,22 @@ Prerequisites:
 - Docker Compose
 - native Linux + V4L2 webcam for physical-camera operation
 
-Run on the **host / WSL shell from the repository root**:
+From the repository root:
 
 ```bash
 cd ~/object_tracking
 docker compose build
 ```
 
-The Dockerfile uses `ros:jazzy-ros-base`, installs dependencies with `rosdep`, and builds the workspace with `colcon`.
+The image is based on `ros:jazzy-ros-base`, dependencies are resolved with `rosdep`, and the workspace is built with `colcon build --symlink-install`.
+
+---
 
 ## Run With a Physical Camera
 
-Default host device:
+The production configuration uses `camera_mode: real`.
 
-```text
-/dev/video0
-```
-
-Run on a **native Linux host from the repository root**:
-
-```bash
-cd <repo-root>
-docker compose up
-```
-
-The production Compose file maps the selected host camera to a stable container path:
-
-```text
-Host camera -> Container /dev/video0
-```
-
-If the host camera is `/dev/video2`, run from the **repository root on the native Linux host**:
-
-```bash
-CAMERA_DEVICE=/dev/video2 docker compose up
-```
-
-Identify available video devices on the **native Linux host** (directory does not matter):
+On native Linux, identify video devices with:
 
 ```bash
 ls -l /dev/video*
@@ -184,39 +166,87 @@ or:
 v4l2-ctl --list-devices
 ```
 
-The ROS node still uses:
+Default:
+
+```bash
+cd ~/object_tracking
+docker compose up
+```
+
+Compose maps the selected host camera to `/dev/video0` inside the container.
+
+If the host camera is `/dev/video2`:
+
+```bash
+CAMERA_DEVICE=/dev/video2 docker compose up
+```
+
+The ROS configuration still uses:
 
 ```yaml
 device_path: /dev/video0
 ```
 
-because Compose performs the host-to-container mapping.
+because the host-specific device number is handled by Docker.
 
-## Camera Failure Behavior
+### Camera failure behavior
 
-If the physical camera cannot be opened, a clear error is logged and the camera executable exits with a non-zero code.
+If the camera cannot be opened, a clear error is logged and the camera executable exits with a non-zero code.
 
 If frame capture fails after startup, the source is closed, ROS shutdown is requested, and the executable exits as a failure.
 
-Normal `Ctrl+C` shutdown is handled without intentionally printing a noisy traceback.
+Normal shutdown is handled without intentionally printing a noisy traceback.
+
+---
+
+## Target FPS and Observed Throughput
+
+The configured `fps` is a **target rate**, not a hard real-time guarantee.
+
+Actual throughput depends on:
+
+- image resolution;
+- camera/backend performance;
+- CPU availability;
+- image conversion;
+- ROS 2/DDS serialization and transport;
+- tracker processing;
+- Docker/WSL overhead and scheduler load.
+
+During development under WSL2:
+
+```text
+160 x 120  -> stable at approximately 10 Hz
+640 x 480  -> effective rate below the configured 10 Hz
+```
+
+The production configuration keeps `640x480 @ 10 FPS` as a target rather than claiming that 10 Hz is guaranteed on every device.
+
+A different machine, native Linux environment, camera backend, or transport configuration may produce different results.
+
+For production use, effective FPS and end-to-end latency should be measured rather than inferred from the configured timer period.
+
+---
 
 ## Fake-Camera Docker Smoke Test
 
-For environments without direct webcam access, run on the **host / WSL shell from the repository root**:
+For environments without direct webcam access:
 
 ```bash
 cd ~/object_tracking
 docker compose -f docker-compose.fake.yml up
 ```
 
-Keep that terminal running. In a **second host / WSL terminal**, also from the repository root:
+Keep that terminal running.
+
+In another host / WSL terminal:
 
 ```bash
 cd ~/object_tracking
 docker compose -f docker-compose.fake.yml exec tracking bash
 ```
 
-The following `ros2 ...` inspection commands in this section are then run **inside that container shell**.
+The following commands run **inside the container**.
 
 Verify nodes:
 
@@ -262,23 +292,15 @@ Verify image rate:
 ros2 topic hz /camera/image_raw
 ```
 
-Expected: approximately **10 Hz**.
-
 Verify tracking output:
 
 ```bash
 ros2 topic echo /tracker/object_state
 ```
 
-`FakeCameraSource` generates a moving red circle, so the tracker should normally report:
+The fake camera generates a moving red circle, so `visible` should normally be `true` with finite `x`/`y` coordinates.
 
-```text
-visible: true
-x: <finite pixel coordinate>
-y: <finite pixel coordinate>
-```
-
-This smoke test validates:
+This validates the containerized software path:
 
 ```text
 FakeCameraSource
@@ -292,101 +314,87 @@ TrackerNode
 /tracker/object_state
 ```
 
-This Docker fake-camera runtime smoke test was executed successfully during development.
+This smoke test was executed successfully during development.
 
-## Automated Tests
+---
 
-Automated tests do **not** require a physical camera.
+## Automated Test Strategy
+
+Automated tests do **not** depend on a physical camera.
 
 The repository contains **13 `test_*` cases** across unit, ROS integration, and end-to-end system levels.
 
-### Fake camera unit tests
-
-File:
+The layered design is intentional:
 
 ```text
-objtrk_ws/src/camera_pkg/test/test_fake_camera.py
+camera-source unit tests
+        +
+detector unit tests
+        ↓
+tracker ROS integration tests
+        ↓
+CameraNode -> TrackerNode system test
 ```
+
+This makes failures easier to localize.
+
+### Fake camera unit tests
+
+File: `objtrk_ws/src/camera_pkg/test/test_fake_camera.py`
 
 | Test function | Design purpose |
 |---|---|
-| `test_fake_camera_returns_image()` | Normal source path: verifies the fake camera opens and returns a valid BGR frame containing a red target. |
-| `test_closed_fake_camera_cannot_read()` | Lifecycle/error path: verifies a closed source returns `(False, None)`. |
-| `test_fake_camera_rejects_invalid_dimensions()` | Configuration validation: invalid dimensions must raise `ValueError`. |
+| `test_fake_camera_returns_image()` | Normal source path: verifies a valid BGR frame containing the synthetic red target. |
+| `test_closed_fake_camera_cannot_read()` | Lifecycle/error path: a closed source returns `(False, None)`. |
+| `test_fake_camera_rejects_invalid_dimensions()` | Configuration validation: invalid dimensions raise `ValueError`. |
 
 ### Detector unit tests
 
-File:
-
-```text
-objtrk_ws/src/tracker_pkg/test/test_detector.py
-```
+File: `objtrk_ws/src/tracker_pkg/test/test_detector.py`
 
 | Test function | Design purpose |
 |---|---|
-| `test_detects_red_object()` | Normal tracking case: a known red circle must be detected near its expected centroid. |
-| `test_no_object_returns_not_visible()` | No-object behavior: black image -> `visible=False`, `x/y=NaN`. |
-| `test_object_below_min_area_is_not_visible()` | Threshold behavior: small red regions below `min_area` must be ignored. |
-| `test_empty_image_raises_value_error()` | Invalid input: an empty image must be rejected explicitly. |
-| `test_invalid_image_shape_raises_value_error()` | Invalid format: non-BGR image shape must be rejected. |
-| `test_invalid_min_area_raises_value_error()` | Invalid configuration: non-positive `min_area` must be rejected. |
-| `test_selects_largest_red_object()` | Multiple candidates: verifies the largest valid red region is selected. |
+| `test_detects_red_object()` | Normal tracking case: known target -> expected visibility and centroid. |
+| `test_no_object_returns_not_visible()` | No-target behavior: `visible=False`, `x/y=NaN`. |
+| `test_object_below_min_area_is_not_visible()` | Small regions below `min_area` are ignored. |
+| `test_empty_image_raises_value_error()` | Empty input is rejected explicitly. |
+| `test_invalid_image_shape_raises_value_error()` | Non-BGR-shaped input is rejected. |
+| `test_invalid_min_area_raises_value_error()` | Non-positive threshold is rejected. |
+| `test_selects_largest_red_object()` | Multiple candidates -> deterministic largest-object selection. |
 
 ### Tracker ROS integration tests
 
-File:
+File: `objtrk_ws/src/tracker_pkg/test/test_tracker_node.py`
 
-```text
-objtrk_ws/src/tracker_pkg/test/test_tracker_node.py
-```
-
-These tests publish controlled `sensor_msgs/Image` messages through ROS and observe `ObjectState`.
+These tests use real ROS pub/sub rather than invoking the callback directly.
 
 | Test function | Design purpose |
 |---|---|
-| `test_tracker_node_publishes_detection(tracker_harness)` | Normal ROS pub/sub path: verifies visible target, expected centroid, and propagated `frame_id`. |
-| `test_tracker_node_reports_not_visible(tracker_harness)` | ROS-level no-object path: verifies a valid invisible result with `NaN` coordinates is still published. |
+| `test_tracker_node_publishes_detection(tracker_harness)` | Verifies normal Image -> TrackerNode -> ObjectState behavior, centroid, and `frame_id`. |
+| `test_tracker_node_reports_not_visible(tracker_harness)` | Verifies a valid invisible state is still published when no target exists. |
 
-Helpers such as `spin_until(...)`, `tracker_harness()`, and `publish_image_and_wait_for_state(...)` support the integration tests but are not standalone tests.
+`spin_until(...)`, `tracker_harness()`, and `publish_image_and_wait_for_state(...)` are support utilities, not independent tests.
 
 ### End-to-end ROS system test
 
-File:
-
-```text
-objtrk_ws/src/tracking_bringup/test/test_tracking_system.py
-```
-
-Test:
+File: `objtrk_ws/src/tracking_bringup/test/test_tracking_system.py`
 
 ```python
 def test_fake_camera_to_tracker_end_to_end():
 ```
 
-Purpose: verify the complete ROS pipeline without manually injecting an image into the tracker.
+Purpose: validate the complete ROS pipeline without manually injecting an image into the tracker.
 
-```text
-FakeCameraSource
-    ↓
-CameraNode
-    ↓
-/camera/image_raw
-    ↓
-TrackerNode
-    ↓
-/tracker/object_state
-```
-
-It verifies that:
+It verifies:
 
 - fake-camera parameters are accepted;
 - `CameraNode.start()` succeeds;
-- image and tracking publishers are discovered;
-- an image and tracking state are produced;
-- image dimensions/encoding are correct;
-- the fake red target is detected;
+- publishers are discovered;
+- image and tracking messages are produced;
+- image dimensions and encoding are correct;
+- the fake target is detected;
 - coordinates are finite and within image bounds;
-- the image `frame_id` is propagated to `ObjectState.header`.
+- `frame_id` is propagated to `ObjectState.header`.
 
 ### Test summary
 
@@ -398,11 +406,11 @@ It verifies that:
 | End-to-end ROS system | `test_tracking_system.py` | 1 |
 | **Total** |  | **13** |
 
-## Run Tests
+---
 
-Run these commands on the **host / WSL Ubuntu shell**.
+## Run Automated Tests
 
-Start from the repository root, then enter the ROS workspace:
+Run on the host / WSL Ubuntu shell:
 
 ```bash
 cd ~/object_tracking
@@ -416,13 +424,13 @@ colcon test --event-handlers console_direct+
 colcon test-result --verbose
 ```
 
-After `cd objtrk_ws`, the build, source, and test commands are executed from the **ROS workspace root**.
+---
 
 ## Pre-commit
 
-`pre-commit` is a development tool and is installed on the **host / WSL Ubuntu environment**, not inside the application container.
+`pre-commit` is installed on the **host / WSL environment**, not inside the application container.
 
-Install `pipx` and `pre-commit` on the host:
+Install with `pipx`:
 
 ```bash
 sudo apt update
@@ -431,9 +439,7 @@ pipx ensurepath
 pipx install pre-commit
 ```
 
-If `pipx ensurepath` updates the shell PATH, open a new terminal (or reload the shell profile) before continuing.
-
-From the **repository root**:
+Then from the repository root:
 
 ```bash
 cd ~/object_tracking
@@ -441,25 +447,109 @@ pre-commit install
 pre-commit run --all-files
 ```
 
-`pre-commit install` installs the Git hook into this repository's `.git/hooks/` directory.
-
 Configured checks include repository hygiene, YAML/XML validation, Ruff linting, and Ruff formatting.
 
-If a hook modifies files automatically, review the changes and run:
+If a hook modifies files, review the changes and run `pre-commit run --all-files` again until all checks pass.
 
-```bash
-pre-commit run --all-files
-```
+---
 
-again from the repository root until all hooks pass.
+## System-Level Limitations and Future Improvements
 
-## Known Limitations
+The main improvement areas are system-level because the detector is only one replaceable component in the pipeline.
 
-### Physical webcam path under WSL2
+### Observability and performance
+
+The current system does not expose explicit performance metrics.
+
+A production implementation should measure:
+
+- effective camera FPS;
+- tracker processing rate;
+- image-to-result latency;
+- dropped/stale frames;
+- processing failures;
+- camera health.
+
+The measured resolution/FPS behavior above is an example of why observed runtime metrics are preferable to assuming the configured rate is achieved.
+
+### Backpressure and overload behavior
+
+The current implementation does not define an explicit policy for cases where image production exceeds downstream processing capacity.
+
+A production system should define whether to:
+
+- drop stale frames;
+- process only the latest frame;
+- use bounded queues;
+- monitor queueing latency;
+- reduce the source rate.
+
+### Failure recovery and supervision
+
+The current implementation fails explicitly on camera errors.
+
+Possible production improvements include:
+
+- bounded reopen attempts with backoff;
+- process/container restart policies;
+- health/readiness checks;
+- ROS diagnostics;
+- structured error counters and logs.
+
+### Test strategy and CI
+
+The current hierarchy covers unit tests, ROS integration, end-to-end fake-camera testing, and a manual container smoke test.
+
+A production CI pipeline could additionally:
+
+- run pre-commit automatically;
+- build from a clean ROS environment;
+- run all automated tests;
+- build the Docker image;
+- automate the fake-camera container smoke test;
+- run physical-camera hardware-in-the-loop tests on a native Linux/V4L2 runner.
+
+Keeping physical hardware tests separate preserves deterministic hardware-independent CI.
+
+### Deployment and configuration
+
+The current design separates host-specific camera paths from the application-visible `/dev/video0`.
+
+Further system-level improvements could include:
+
+- hardware-specific deployment profiles;
+- CPU/memory limits;
+- restart policies;
+- configuration versioning;
+- centralized metrics/logging;
+- multiple namespaced camera/tracker instances.
+
+### Component boundaries
+
+`CameraSource` isolates hardware capture from `CameraNode`, and `RedObjectDetector` isolates perception logic from `TrackerNode`.
+
+This means the camera implementation or tracking algorithm can be replaced without changing the ROS message contract.
+
+### Tracking-specific limitations
+
+The current perception algorithm is intentionally simple:
+
+- fixed HSV thresholds are lighting-sensitive;
+- unrelated red objects can cause false positives;
+- only the largest valid region is selected;
+- no persistent track ID or temporal model is used;
+- occlusion and multi-object tracking are not handled;
+- no confidence score is published.
+
+These are known limitations, but the focus of this exercise is the system structure, robustness, testability, configuration, and deployment boundaries around the tracking component.
+
+---
+
+## Development Environment Limitation: Physical Webcam on WSL2
 
 Development and container smoke testing were performed under **WSL2**.
 
-Direct physical webcam `/dev/video*` access was not available in that environment, so this exact hardware path was not directly validated:
+Direct physical webcam `/dev/video*` access was not available, so this exact path was not directly validated:
 
 ```text
 physical host webcam
@@ -479,31 +569,9 @@ The complete containerized **software** pipeline was validated with `FakeCameraS
 
 Physical-camera passthrough should therefore be verified on a native Linux host with V4L2 camera access.
 
-### Tracking limitations
-
-- fixed HSV thresholds are sensitive to lighting and camera color response;
-- unrelated red objects can cause false positives;
-- only the largest valid red region is selected;
-- no persistent track ID or temporal motion model is used;
-- occlusion and multi-object tracking are not handled;
-- no confidence score is published.
-
-## Possible Extensions
-
-Possible extensions include:
-
-- configurable HSV thresholds;
-- multiple cameras and namespaces;
-- multi-object tracking with persistent IDs;
-- Kalman filtering or optical flow;
-- learned object detection;
-- debug-image publication;
-- ROS diagnostics and performance metrics;
-- CI and automated container runtime tests.
+---
 
 ## Quick Reference
-
-All Docker Compose and pre-commit commands below are run on the **host / WSL shell from the repository root** unless noted otherwise.
 
 Repository root:
 
@@ -517,7 +585,7 @@ Build:
 docker compose build
 ```
 
-Run with the default physical camera on native Linux:
+Run with default physical camera on native Linux:
 
 ```bash
 docker compose up
@@ -529,24 +597,15 @@ Run with another host camera:
 CAMERA_DEVICE=/dev/video2 docker compose up
 ```
 
-Run the fake-camera smoke test:
+Run fake-camera smoke test:
 
 ```bash
 docker compose -f docker-compose.fake.yml up
 ```
 
-Enter the running fake-camera container from a second host terminal:
+Run tests:
 
 ```bash
-docker compose -f docker-compose.fake.yml exec tracking bash
-```
-
-Then run ROS inspection commands such as `ros2 node list` **inside the container**.
-
-Run automated tests on the **host / WSL Ubuntu shell**:
-
-```bash
-cd ~/object_tracking
 source /opt/ros/jazzy/setup.bash
 cd objtrk_ws
 colcon build --symlink-install
@@ -555,7 +614,7 @@ colcon test --event-handlers console_direct+
 colcon test-result --verbose
 ```
 
-Run static checks on the **host / WSL shell from the repository root**:
+Run static checks:
 
 ```bash
 cd ~/object_tracking
