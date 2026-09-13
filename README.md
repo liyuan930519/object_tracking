@@ -182,6 +182,32 @@ The resulting image is:
 object-tracking:jazzy
 ```
 
+### Optional local environment overrides
+
+`.env.example` documents the Docker Compose environment variables that may vary between hosts. The default configuration works without creating a `.env` file.
+
+For persistent local overrides, copy the example file from the repository root:
+
+```bash
+cp .env.example .env
+```
+
+Then edit `.env` as needed, for example to select a different host camera, ROS domain, or ROS distro:
+
+```env
+CAMERA_DEVICE=/dev/video2
+ROS_DOMAIN_ID=0
+ROS_DISTRO=jazzy
+```
+
+Docker Compose automatically reads `.env` from the repository root. `.env` is intended for machine-specific local settings and should not be committed.
+
+For a one-off override, no `.env` file is required:
+
+```bash
+CAMERA_DEVICE=/dev/video2 docker compose up
+```
+
 ---
 
 ## Run With a Physical Camera
